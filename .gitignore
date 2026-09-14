@@ -1,0 +1,47 @@
+cd ~/projects/ambient-agent
+
+cat > .gitignore <<'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python cache
+.pytest_cache/
+.cache/
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# Models / large files
+models/
+*.bin
+*.pt
+*.pth
+*.gguf
+
+# Local generated data
+data/raw/
+data/processed/
+EOF

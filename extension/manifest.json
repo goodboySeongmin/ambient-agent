@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Ambient Agent Observer",
-  "version": "0.1.0",
-  "description": "Captures browser activity for Ambient Agent.",
+  "version": "0.2.0",
+  "description": "Understands browser activity and proactively offers help when the user appears stuck.",
   "permissions": [
     "tabs",
-    "activeTab"
+    "activeTab",
+    "alarms",
+    "notifications",
+    "storage"
   ],
   "host_permissions": [
     "http://localhost:8000/*",

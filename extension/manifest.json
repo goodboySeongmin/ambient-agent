@@ -1,24 +1,50 @@
 {
   "manifest_version": 3,
   "name": "Ambient Agent Observer",
-  "version": "0.2.0",
-  "description": "Understands browser activity and proactively offers help when the user appears stuck.",
+  "version": "0.5.0",
+  "description": "Captures browser activity and provides proactive ambient assistance.",
+
   "permissions": [
     "tabs",
     "activeTab",
     "alarms",
-    "notifications",
-    "storage"
+    "storage",
+    "scripting"
   ],
+
   "host_permissions": [
     "http://localhost:8000/*",
-    "http://127.0.0.1:8000/*"
+    "http://127.0.0.1:8000/*",
+    "http://*/*",
+    "https://*/*"
   ],
+
   "background": {
     "service_worker": "background.js"
   },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Ambient Agent"
+    "default_title": "Ambient Agent",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "128": "icons/icon128.png"
   }
 }

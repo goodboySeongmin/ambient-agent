@@ -44,6 +44,10 @@ from app.services.intervention_engine import (
     calculate_intervention,
 )
 
+from app.services.solution_engine import (
+    generate_solution,
+)
+
 router = APIRouter()
 
 
@@ -646,6 +650,56 @@ def get_session_context(
     except ValueError as exc:
         raise HTTPException(
             status_code=502,
+            detail=str(
+                exc
+            ),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+
+# =========================================================
+# Solution Agent
+# =========================================================
+
+@router.post(
+    "/sessions/current/solution"
+)
+def get_current_solution(
+    db: DBSession = Depends(
+        get_db
+    ),
+):
+    try:
+        session_id = (
+            get_current_session_id(
+                db
+            )
+        )
+
+        return (
+            generate_solution(
+                db,
+                session_id,
+            )
+        )
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(
+                exc
+            ),
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
             detail=str(
                 exc
             ),

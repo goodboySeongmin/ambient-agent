@@ -11,38 +11,39 @@ const INTERVENTION_API_URL =
 // Configuration
 // ==========================================================
 
-// Chrome alarms의 안정적인 최소 주기를 고려해
-// MVP에서는 1분마다 확인한다.
 const INTERVENTION_ALARM_NAME =
   "ambient-agent-intervention-check";
 
 const INTERVENTION_CHECK_PERIOD_MINUTES = 1;
 
-
-// 같은 문제에 대해 계속 알림이 뜨지 않도록 한다.
 const INTERVENTION_COOLDOWN_MS =
   10 * 60 * 1000;
 
-
-// Activity event deduplication
 const DEDUP_WINDOW_MS = 3000;
 
-
-// Intervention storage key
 const LAST_INTERVENTION_KEY =
   "ambient_agent_last_intervention";
 
 
-// ----------------------------------------------------------
-// Event deduplication memory
-// ----------------------------------------------------------
+// ==========================================================
+// Runtime state
+// ==========================================================
 
-const recentEvents = new Map();
+const recentEvents =
+  new Map();
+
+let latestAgentState =
+  "unknown";
+
+// DevTools / chrome://extensions 등이 포커스를 가져가도
+// 마지막으로 사용한 실제 웹 탭을 기억한다.
+let lastActiveWebTabId =
+  null;
 
 
-// ----------------------------------------------------------
-// Blocked protocols
-// ----------------------------------------------------------
+// ==========================================================
+// URL filtering
+// ==========================================================
 
 const BLOCKED_PROTOCOLS = [
   "chrome:",
@@ -53,19 +54,18 @@ const BLOCKED_PROTOCOLS = [
 ];
 
 
-// ==========================================================
-// URL filtering
-// ==========================================================
-
 function shouldIgnoreUrl(url) {
   if (!url) {
     return true;
   }
 
+
   try {
     const parsedUrl =
       new URL(url);
 
+
+    // 브라우저 내부 페이지 제외
     if (
       BLOCKED_PROTOCOLS.includes(
         parsedUrl.protocol
@@ -74,12 +74,15 @@ function shouldIgnoreUrl(url) {
       return true;
     }
 
+
+    // Ambient Agent 자체 페이지 제외
     if (
       parsedUrl.hostname === "localhost" ||
       parsedUrl.hostname === "127.0.0.1"
     ) {
       return true;
     }
+
 
     return false;
 
@@ -89,13 +92,14 @@ function shouldIgnoreUrl(url) {
       url
     );
 
+
     return true;
   }
 }
 
 
 // ==========================================================
-// Domain extraction
+// Domain
 // ==========================================================
 
 function getDomain(url) {
@@ -109,13 +113,14 @@ function getDomain(url) {
 
 
 // ==========================================================
-// Search query extraction
+// Search query
 // ==========================================================
 
 function extractSearchQuery(url) {
   if (!url) {
     return null;
   }
+
 
   try {
     const parsedUrl =
@@ -196,6 +201,7 @@ function extractSearchQuery(url) {
       error
     );
 
+
     return null;
   }
 }
@@ -218,24 +224,27 @@ function isDuplicate(
   const previousTime =
     recentEvents.get(key);
 
+
   recentEvents.set(
     key,
     now
   );
 
+
   if (!previousTime) {
     return false;
   }
 
+
   return (
-    now - previousTime
-    < DEDUP_WINDOW_MS
+    now - previousTime <
+    DEDUP_WINDOW_MS
   );
 }
 
 
 // ==========================================================
-// Send activity event
+// Event Collector
 // ==========================================================
 
 async function sendEvent(
@@ -248,7 +257,7 @@ async function sendEvent(
 
 
   // --------------------------------------------------------
-  // Incognito
+  // Incognito 제외
   // --------------------------------------------------------
 
   if (tab.incognito) {
@@ -256,12 +265,13 @@ async function sendEvent(
       "[Ambient Agent] Skip incognito tab"
     );
 
+
     return;
   }
 
 
   // --------------------------------------------------------
-  // URL filtering
+  // 제외 대상 URL
   // --------------------------------------------------------
 
   if (
@@ -274,7 +284,7 @@ async function sendEvent(
 
 
   // --------------------------------------------------------
-  // Deduplication
+  // 중복 이벤트 제외
   // --------------------------------------------------------
 
   if (
@@ -288,13 +298,15 @@ async function sendEvent(
 
 
   // --------------------------------------------------------
-  // Payload
+  // Event payload
   // --------------------------------------------------------
 
   const payload = {
-    source: "chrome",
+    source:
+      "chrome",
 
-    event_type: eventType,
+    event_type:
+      eventType,
 
     url:
       tab.url || null,
@@ -312,7 +324,8 @@ async function sendEvent(
         tab.url
       ),
 
-    is_sensitive: false
+    is_sensitive:
+      false
   };
 
 
@@ -323,7 +336,7 @@ async function sendEvent(
 
 
   // --------------------------------------------------------
-  // FastAPI
+  // FastAPI 전송
   // --------------------------------------------------------
 
   try {
@@ -331,7 +344,8 @@ async function sendEvent(
       await fetch(
         EVENTS_API_URL,
         {
-          method: "POST",
+          method:
+            "POST",
 
           headers: {
             "Content-Type":
@@ -350,11 +364,13 @@ async function sendEvent(
       const errorText =
         await response.text();
 
+
       console.error(
         "[Ambient Agent] Event API error:",
         response.status,
         errorText
       );
+
 
       return;
     }
@@ -379,27 +395,473 @@ async function sendEvent(
 
 
 // ==========================================================
-// Intervention key
+// Active Web Tab Tracking
+// ==========================================================
+
+function rememberWebTab(tab) {
+  if (!tab?.id) {
+    return;
+  }
+
+
+  if (
+    shouldIgnoreUrl(
+      tab.url
+    )
+  ) {
+    return;
+  }
+
+
+  lastActiveWebTabId =
+    tab.id;
+
+
+  console.debug(
+    "[Ambient Agent] Remembered web tab:",
+    {
+      id:
+        tab.id,
+
+      title:
+        tab.title,
+
+      url:
+        tab.url
+    }
+  );
+}
+
+
+// ==========================================================
+// Find Active Web Tab
+// ==========================================================
+
+async function getActiveWebTab() {
+  try {
+
+    // ------------------------------------------------------
+    // 1. 모든 Chrome Window의 active tab 확인
+    //
+    // lastFocusedWindow를 사용하지 않는다.
+    // DevTools가 focus를 가져가도 실제 web tab을 찾기 위함.
+    // ------------------------------------------------------
+
+    const activeTabs =
+      await chrome.tabs.query({
+        active: true
+      });
+
+
+    const webTabs =
+      activeTabs.filter(
+        (tab) =>
+          tab?.id &&
+          !shouldIgnoreUrl(
+            tab.url
+          )
+      );
+
+
+    // ------------------------------------------------------
+    // 2. 마지막으로 기억한 실제 Web Tab 우선
+    // ------------------------------------------------------
+
+    if (
+      lastActiveWebTabId !== null
+    ) {
+
+      const rememberedActiveTab =
+        webTabs.find(
+          (tab) =>
+            tab.id ===
+            lastActiveWebTabId
+        );
+
+
+      if (rememberedActiveTab) {
+        return rememberedActiveTab;
+      }
+
+
+      // active 목록에 없어도
+      // 해당 tab이 아직 존재하면 사용한다.
+      try {
+        const rememberedTab =
+          await chrome.tabs.get(
+            lastActiveWebTabId
+          );
+
+
+        if (
+          rememberedTab?.id &&
+          !shouldIgnoreUrl(
+            rememberedTab.url
+          )
+        ) {
+          return rememberedTab;
+        }
+
+      } catch (error) {
+        // 탭이 닫혔거나 더 이상 존재하지 않는 경우
+        lastActiveWebTabId =
+          null;
+      }
+    }
+
+
+    // ------------------------------------------------------
+    // 3. 현재 active 상태의 실제 Web Tab 사용
+    // ------------------------------------------------------
+
+    if (
+      webTabs.length > 0
+    ) {
+      const tab =
+        webTabs[0];
+
+
+      rememberWebTab(
+        tab
+      );
+
+
+      return tab;
+    }
+
+
+    // ------------------------------------------------------
+    // 4. Fallback
+    //
+    // 일반 web tab 중 사용할 수 있는 탭을 찾는다.
+    // ------------------------------------------------------
+
+    const allTabs =
+      await chrome.tabs.query({});
+
+
+    let fallbackTab =
+      allTabs.find(
+        (tab) =>
+          tab?.id &&
+          tab.active &&
+          !shouldIgnoreUrl(
+            tab.url
+          )
+      );
+
+
+    if (!fallbackTab) {
+      fallbackTab =
+        allTabs.find(
+          (tab) =>
+            tab?.id &&
+            !shouldIgnoreUrl(
+              tab.url
+            )
+        );
+    }
+
+
+    if (!fallbackTab) {
+      console.warn(
+        "[Ambient Agent] No usable web tab found."
+      );
+
+
+      return null;
+    }
+
+
+    rememberWebTab(
+      fallbackTab
+    );
+
+
+    return fallbackTab;
+
+  } catch (error) {
+    console.error(
+      "[Ambient Agent] Failed to get active web tab:",
+      error
+    );
+
+
+    return null;
+  }
+}
+
+
+// ==========================================================
+// Content Script Injection
+// ==========================================================
+
+async function injectContentScript(
+  tabId
+) {
+  if (!tabId) {
+    return false;
+  }
+
+
+  try {
+    console.log(
+      "[Ambient Agent] Injecting content script:",
+      tabId
+    );
+
+
+    await chrome.scripting.executeScript({
+      target: {
+        tabId
+      },
+
+      files: [
+        "content.js"
+      ]
+    });
+
+
+    console.log(
+      "[Ambient Agent] Content script injected:",
+      tabId
+    );
+
+
+    return true;
+
+  } catch (error) {
+    console.warn(
+      "[Ambient Agent] Content script injection failed:",
+      error?.message ||
+      error
+    );
+
+
+    return false;
+  }
+}
+
+
+// ==========================================================
+// Content Script Messaging
+// ==========================================================
+
+async function sendMessageToTab(
+  tabId,
+  payload
+) {
+  if (!tabId) {
+    return false;
+  }
+
+
+  // --------------------------------------------------------
+  // 1차 메시지 전송
+  // --------------------------------------------------------
+
+  try {
+    const response =
+      await chrome.tabs.sendMessage(
+        tabId,
+        payload
+      );
+
+
+    console.debug(
+      "[Ambient Agent] Content response:",
+      response
+    );
+
+
+    return true;
+
+  } catch (firstError) {
+    console.debug(
+      "[Ambient Agent] Initial message failed:",
+      firstError?.message ||
+      firstError
+    );
+  }
+
+
+  // --------------------------------------------------------
+  // Receiver가 없다면 content.js 동적 주입
+  // --------------------------------------------------------
+
+  const injected =
+    await injectContentScript(
+      tabId
+    );
+
+
+  if (!injected) {
+    return false;
+  }
+
+
+  // content.js의 listener 등록 시간을 아주 조금 확보한다.
+  await new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        100
+      )
+  );
+
+
+  // --------------------------------------------------------
+  // 2차 메시지 전송
+  // --------------------------------------------------------
+
+  try {
+    const response =
+      await chrome.tabs.sendMessage(
+        tabId,
+        payload
+      );
+
+
+    console.log(
+      "[Ambient Agent] Message delivered after reinjection:",
+      payload.type,
+      response
+    );
+
+
+    return true;
+
+  } catch (secondError) {
+    console.warn(
+      "[Ambient Agent] Message failed after reinjection:",
+      secondError?.message ||
+      secondError
+    );
+
+
+    return false;
+  }
+}
+
+
+// ==========================================================
+// Send Message To Current Web Tab
+// ==========================================================
+
+async function sendMessageToActiveTab(
+  payload
+) {
+  const tab =
+    await getActiveWebTab();
+
+
+  if (!tab?.id) {
+    console.warn(
+      "[Ambient Agent] No target tab for message:",
+      payload.type
+    );
+
+
+    return false;
+  }
+
+
+  console.debug(
+    "[Ambient Agent] Message target:",
+    {
+      type:
+        payload.type,
+
+      tab_id:
+        tab.id,
+
+      title:
+        tab.title,
+
+      url:
+        tab.url
+    }
+  );
+
+
+  const delivered =
+    await sendMessageToTab(
+      tab.id,
+      payload
+    );
+
+
+  if (delivered) {
+    rememberWebTab(
+      tab
+    );
+
+
+    console.log(
+      "[Ambient Agent] Message delivered:",
+      payload.type,
+      "→ tab",
+      tab.id
+    );
+  }
+
+
+  return delivered;
+}
+
+
+// ==========================================================
+// Presence State
+// ==========================================================
+
+async function publishAgentState(
+  state
+) {
+  latestAgentState =
+    state ||
+    "unknown";
+
+
+  await sendMessageToActiveTab({
+    type:
+      "AMBIENT_STATE_UPDATE",
+
+    state:
+      latestAgentState
+  });
+}
+
+
+// ==========================================================
+// Intervention Identity
 // ==========================================================
 
 function buildInterventionKey(
   intervention
 ) {
   const sessionId =
-    intervention.session_id ?? "unknown";
-
-  const blocker =
-    intervention.context?.blocker ??
-    intervention.context?.task ??
-    intervention.context?.goal ??
+    intervention.session_id ??
     "unknown";
 
-  return `${sessionId}:${blocker}`;
+
+  const context =
+    intervention.context ||
+    {};
+
+
+  const subject =
+    context.blocker ??
+    context.task ??
+    context.goal ??
+    "unknown";
+
+
+  return `${sessionId}:${subject}`;
 }
 
 
 // ==========================================================
-// Cooldown check
+// Intervention Cooldown
 // ==========================================================
 
 async function canShowIntervention(
@@ -410,15 +872,18 @@ async function canShowIntervention(
       intervention
     );
 
+
   const stored =
     await chrome.storage.local.get(
       LAST_INTERVENTION_KEY
     );
 
+
   const previous =
     stored[
       LAST_INTERVENTION_KEY
     ];
+
 
   if (!previous) {
     return true;
@@ -426,25 +891,35 @@ async function canShowIntervention(
 
 
   const sameIntervention =
-    previous.key === currentKey;
+    previous.key ===
+    currentKey;
+
 
   const elapsed =
     Date.now() -
     previous.timestamp;
 
 
-  // 같은 문제 + cooldown 이내
   if (
     sameIntervention &&
-    elapsed < INTERVENTION_COOLDOWN_MS
+    elapsed <
+      INTERVENTION_COOLDOWN_MS
   ) {
     console.log(
       "[Ambient Agent] Intervention suppressed by cooldown:",
       {
-        key: currentKey,
-        elapsed
+        key:
+          currentKey,
+
+        elapsed_ms:
+          elapsed,
+
+        remaining_ms:
+          INTERVENTION_COOLDOWN_MS -
+          elapsed
       }
     );
+
 
     return false;
   }
@@ -454,134 +929,32 @@ async function canShowIntervention(
 }
 
 
-// ==========================================================
-// Save intervention history
-// ==========================================================
-
 async function rememberIntervention(
   intervention
 ) {
-  const value = {
-    key:
-      buildInterventionKey(
-        intervention
-      ),
-
-    timestamp:
-      Date.now(),
-
-    session_id:
-      intervention.session_id,
-
-    blocker:
-      intervention.context?.blocker ??
-      null
-  };
-
-
   await chrome.storage.local.set({
-    [LAST_INTERVENTION_KEY]:
-      value
+    [LAST_INTERVENTION_KEY]: {
+      key:
+        buildInterventionKey(
+          intervention
+        ),
+
+      timestamp:
+        Date.now(),
+
+      session_id:
+        intervention.session_id,
+
+      blocker:
+        intervention.context?.blocker ??
+        null
+    }
   });
 }
 
 
 // ==========================================================
-// Notification text
-// ==========================================================
-
-function buildNotificationMessage(
-  intervention
-) {
-  const context =
-    intervention.context || {};
-
-
-  if (context.blocker) {
-    return (
-      `${context.blocker} 문제를 ` +
-      `해결하는 데 도움을 드릴까요?`
-    );
-  }
-
-
-  if (context.task) {
-    return (
-      `${context.task}. ` +
-      `도움이 필요하신가요?`
-    );
-  }
-
-
-  if (context.goal) {
-    return (
-      `${context.goal}와 관련해 ` +
-      `도움을 드릴까요?`
-    );
-  }
-
-
-  return (
-    "현재 작업에서 막힌 것 같아요. " +
-    "도움을 드릴까요?"
-  );
-}
-
-
-// ==========================================================
-// Show proactive notification
-// ==========================================================
-
-async function showInterventionNotification(
-  intervention
-) {
-  const message =
-    buildNotificationMessage(
-      intervention
-    );
-
-
-  const notificationId =
-    `ambient-agent-${Date.now()}`;
-
-
-  await chrome.notifications.create(
-    notificationId,
-    {
-      type: "basic",
-
-      iconUrl:
-        "icons/icon128.png",
-
-      title:
-        "Ambient Agent",
-
-      message,
-
-      priority: 2,
-
-      requireInteraction: true
-    }
-  );
-
-
-  await rememberIntervention(
-    intervention
-  );
-
-
-  console.log(
-    "[Ambient Agent] Proactive intervention shown:",
-    {
-      notificationId,
-      intervention
-    }
-  );
-}
-
-
-// ==========================================================
-// Check intervention
+// Intervention Watcher
 // ==========================================================
 
 async function checkIntervention() {
@@ -595,9 +968,11 @@ async function checkIntervention() {
       await fetch(
         INTERVENTION_API_URL,
         {
-          method: "GET",
+          method:
+            "GET",
 
-          cache: "no-store"
+          cache:
+            "no-store"
         }
       );
 
@@ -606,11 +981,13 @@ async function checkIntervention() {
       const errorText =
         await response.text();
 
+
       console.error(
         "[Ambient Agent] Intervention API error:",
         response.status,
         errorText
       );
+
 
       return;
     }
@@ -627,7 +1004,21 @@ async function checkIntervention() {
 
 
     // ------------------------------------------------------
-    // No intervention
+    // Context → Ambient Presence
+    // ------------------------------------------------------
+
+    const contextState =
+      intervention.context?.state ||
+      "unknown";
+
+
+    await publishAgentState(
+      contextState
+    );
+
+
+    // ------------------------------------------------------
+    // Intervention 불필요
     // ------------------------------------------------------
 
     if (
@@ -653,11 +1044,48 @@ async function checkIntervention() {
 
 
     // ------------------------------------------------------
-    // Show
+    // Ambient Whisper
     // ------------------------------------------------------
 
-    await showInterventionNotification(
+    const delivered =
+      await sendMessageToActiveTab({
+        type:
+          "AMBIENT_INTERVENTION",
+
+        intervention
+      });
+
+
+    if (!delivered) {
+      console.warn(
+        "[Ambient Agent] Whisper was not delivered."
+      );
+
+
+      // 실제 사용자 화면에 표시되지 않았으므로
+      // cooldown을 기록하지 않는다.
+      return;
+    }
+
+
+    // 실제 전달 성공 이후에만 cooldown 기록
+    await rememberIntervention(
       intervention
+    );
+
+
+    console.log(
+      "[Ambient Agent] Ambient Whisper shown.",
+      {
+        session_id:
+          intervention.session_id,
+
+        intervention_score:
+          intervention.intervention_score,
+
+        level:
+          intervention.level
+      }
     );
 
   } catch (error) {
@@ -670,7 +1098,7 @@ async function checkIntervention() {
 
 
 // ==========================================================
-// Alarm initialization
+// Intervention Alarm
 // ==========================================================
 
 async function ensureInterventionAlarm() {
@@ -681,9 +1109,10 @@ async function ensureInterventionAlarm() {
 
 
   if (existing) {
-    console.log(
+    console.debug(
       "[Ambient Agent] Intervention alarm already exists."
     );
+
 
     return;
   }
@@ -708,7 +1137,7 @@ async function ensureInterventionAlarm() {
 
 
 // ==========================================================
-// Extension installed / updated
+// Extension Installed / Updated
 // ==========================================================
 
 chrome.runtime.onInstalled.addListener(
@@ -717,16 +1146,18 @@ chrome.runtime.onInstalled.addListener(
       "[Ambient Agent] Extension installed/updated."
     );
 
+
     await ensureInterventionAlarm();
 
-    // 개발 중에는 설치 직후 한 번 확인
+
+    // 개발 중에는 reload 직후 상태를 한 번 확인한다.
     await checkIntervention();
   }
 );
 
 
 // ==========================================================
-// Browser startup
+// Browser Startup
 // ==========================================================
 
 chrome.runtime.onStartup.addListener(
@@ -735,13 +1166,14 @@ chrome.runtime.onStartup.addListener(
       "[Ambient Agent] Browser started."
     );
 
+
     await ensureInterventionAlarm();
   }
 );
 
 
 // ==========================================================
-// Alarm listener
+// Alarm Listener
 // ==========================================================
 
 chrome.alarms.onAlarm.addListener(
@@ -765,6 +1197,7 @@ chrome.alarms.onAlarm.addListener(
 
 chrome.tabs.onActivated.addListener(
   async (activeInfo) => {
+
     try {
       const tab =
         await chrome.tabs.get(
@@ -772,10 +1205,37 @@ chrome.tabs.onActivated.addListener(
         );
 
 
+      // 마지막 실제 Web Tab 기억
+      rememberWebTab(
+        tab
+      );
+
+
+      // Activity Event 저장
       await sendEvent(
         "tab_activated",
         tab
       );
+
+
+      // 이미 알고 있는 Agent state만
+      // 새 탭의 Presence에 전달한다.
+      if (
+        !shouldIgnoreUrl(
+          tab.url
+        )
+      ) {
+        await sendMessageToTab(
+          tab.id,
+          {
+            type:
+              "AMBIENT_STATE_UPDATE",
+
+            state:
+              latestAgentState
+          }
+        );
+      }
 
     } catch (error) {
       console.error(
@@ -797,6 +1257,8 @@ chrome.tabs.onUpdated.addListener(
     changeInfo,
     tab
   ) => {
+
+    // 페이지 로딩 완료 시점만 기록
     if (
       changeInfo.status !==
       "complete"
@@ -805,16 +1267,75 @@ chrome.tabs.onUpdated.addListener(
     }
 
 
+    // 마지막 실제 Web Tab 기억
+    rememberWebTab(
+      tab
+    );
+
+
+    // Activity Event 저장
     await sendEvent(
       "page_visit",
       tab
+    );
+
+
+    if (
+      shouldIgnoreUrl(
+        tab.url
+      )
+    ) {
+      return;
+    }
+
+
+    // content.js가 document_idle에서 mount될 시간을
+    // 조금 준 뒤 현재 state 전달
+    setTimeout(
+      async () => {
+        await sendMessageToTab(
+          tabId,
+          {
+            type:
+              "AMBIENT_STATE_UPDATE",
+
+            state:
+              latestAgentState
+          }
+        );
+      },
+
+      300
     );
   }
 );
 
 
 // ==========================================================
-// Service worker startup
+// TAB REMOVED
+// ==========================================================
+
+chrome.tabs.onRemoved.addListener(
+  (tabId) => {
+
+    if (
+      tabId ===
+      lastActiveWebTabId
+    ) {
+      lastActiveWebTabId =
+        null;
+
+
+      console.debug(
+        "[Ambient Agent] Remembered web tab closed."
+      );
+    }
+  }
+);
+
+
+// ==========================================================
+// Service Worker Start
 // ==========================================================
 
 console.log(
@@ -822,7 +1343,6 @@ console.log(
 );
 
 
-// Service worker가 wake된 경우에도 alarm 존재 보장
 ensureInterventionAlarm().catch(
   (error) => {
     console.error(

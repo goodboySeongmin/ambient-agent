@@ -16,6 +16,10 @@ from app.db.database import (
     SessionLocal,
 )
 
+from app.schemas.feedback import (
+    FeedbackCreate,
+)
+
 from app.services.activity_normalizer import (
     get_normalized_activities,
 )
@@ -46,6 +50,12 @@ from app.services.intervention_engine import (
 
 from app.services.solution_engine import (
     generate_solution,
+)
+
+from app.services.feedback_engine import (
+    apply_feedback_suppression,
+    create_feedback,
+    serialize_feedback,
 )
 
 router = APIRouter()
@@ -362,11 +372,16 @@ def get_current_intervention(
             )
         )
 
-        return (
+        intervention = (
             calculate_intervention(
                 db,
                 session_id,
             )
+        )
+
+        return apply_feedback_suppression(
+            db,
+            intervention,
         )
 
     except RuntimeError as exc:
@@ -393,6 +408,66 @@ def get_current_intervention(
             ),
         )
     
+# =========================================================
+# Current Session Feedback
+# =========================================================
+
+@router.post(
+    "/sessions/current/feedback",
+    status_code=201,
+)
+def create_current_feedback(
+    feedback_data: FeedbackCreate,
+    db: DBSession = Depends(
+        get_db
+    ),
+):
+    try:
+        session_id = (
+            get_current_session_id(
+                db
+            )
+        )
+
+        feedback = create_feedback(
+            db,
+            session_id,
+            feedback_data.feedback_type,
+            feedback_data.intervention.model_dump(),
+        )
+
+        return serialize_feedback(
+            feedback
+        )
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(
+                exc
+            ),
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(
+                exc
+            ),
+        )
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+
+
+
 # =========================================================
 # Session Features
 # =========================================================

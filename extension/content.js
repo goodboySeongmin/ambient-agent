@@ -1243,11 +1243,13 @@
       "visible"
     );
 
-    assistButton.style.display =
-      "none";
+    assistButton.style.display = "";
+    assistButton.disabled = false;
+    assistButton.textContent =
+      "도움됐어요";
 
     dismissButton.textContent =
-      "닫기";
+      "아쉬워요";
 
     solutionLoading = false;
 
@@ -1290,6 +1292,74 @@
       "닫기";
 
     solutionLoading = false;
+  }
+
+
+  async function postFeedback(
+    feedbackType
+  ) {
+    if (!currentIntervention) {
+      console.warn(
+        "[Ambient Agent] Feedback skipped: no current intervention."
+      );
+
+      return false;
+    }
+
+
+    try {
+      const response =
+        await fetch(
+          "http://localhost:8000/sessions/current/feedback",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+            body: JSON.stringify({
+              feedback_type:
+                feedbackType,
+              intervention:
+                currentIntervention
+            })
+          }
+        );
+
+
+      let payload = null;
+
+      try {
+        payload =
+          await response.json();
+      } catch (_) {
+        payload = null;
+      }
+
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.detail ||
+          `Feedback request failed: ${response.status}`
+        );
+      }
+
+
+      console.log(
+        "[Ambient Agent] Feedback saved:",
+        payload
+      );
+
+      return true;
+
+    } catch (error) {
+      console.error(
+        "[Ambient Agent] Feedback request failed:",
+        error
+      );
+
+      return false;
+    }
   }
 
 
@@ -1430,11 +1500,31 @@
   assistButton.addEventListener(
     "click",
     async () => {
+      if (
+        assistButton.textContent ===
+        "도움됐어요"
+      ) {
+        await postFeedback(
+          "helpful"
+        );
+
+        hideWhisper();
+
+        return;
+      }
+
+
       console.log(
         "[Ambient Agent] User requested assistance:",
         currentIntervention
       );
 
+
+      // Feedback 저장 실패가
+      // 실제 도움 제공을 막지는 않는다.
+      await postFeedback(
+        "accepted"
+      );
 
       await requestSolution();
     }
@@ -1443,12 +1533,40 @@
 
   dismissButton.addEventListener(
     "click",
-    () => {
+    async () => {
+      if (
+        dismissButton.textContent ===
+        "아쉬워요"
+      ) {
+        await postFeedback(
+          "not_helpful"
+        );
+
+        hideWhisper();
+
+        return;
+      }
+
+
+      if (
+        dismissButton.textContent ===
+        "닫기"
+      ) {
+        hideWhisper();
+
+        return;
+      }
+
+
       console.log(
         "[Ambient Agent] User dismissed intervention:",
         currentIntervention
       );
 
+
+      await postFeedback(
+        "dismissed"
+      );
 
       hideWhisper();
     }

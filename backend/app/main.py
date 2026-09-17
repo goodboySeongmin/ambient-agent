@@ -5,6 +5,7 @@ from sqlalchemy import text
 from app.api.events import router as events_router
 from app.db.database import Base, engine
 from app.models.event import Event
+from app.models.feedback import Feedback
 from app.models.session import Session
 from app.api.sessions import router as sessions_router
 

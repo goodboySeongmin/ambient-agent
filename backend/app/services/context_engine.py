@@ -128,12 +128,9 @@ META_CONTEXT_PATTERNS = (
 # =========================================================
 
 SYSTEM_PROMPT = """
-당신은 사용자의 최근 브라우저 검색 활동에서
-현재 작업 맥락을 추출하는 엔진입니다.
+당신은 최근 브라우저 활동으로 사용자의 현재 작업 맥락을 추론하는 엔진입니다.
 
-입력 데이터는 이미 필요한 정보만 압축되어 있습니다.
-
-반드시 아래 JSON 구조만 반환하세요.
+반드시 JSON 객체 하나만 반환하세요.
 
 {
   "goal": null,
@@ -143,17 +140,15 @@ SYSTEM_PROMPT = """
   "confidence": 0.0
 }
 
-필드 의미:
+필드:
 
 goal:
-사용자가 궁극적으로 해결하거나 달성하려는 것
+사용자가 현재 달성하려는 목적
 
 task:
-사용자가 현재 실제로 하고 있는 행동
+사용자가 지금 수행하는 구체적인 작업
 
 state:
-아래 중 하나
-
 researching
 reading
 comparing
@@ -161,128 +156,90 @@ debugging
 deciding
 implementing
 unknown
+중 하나
 
 blocker:
-최근 검색이나 제목에서 직접 확인되는 구체적인 문제
+evidence에서 직접 확인되는 문제.
+명확한 문제가 없으면 null.
 
 confidence:
-0.0 ~ 1.0
+현재 goal/task 추론의 확신도. 0.0 ~ 1.0.
 
 
-==================================================
-언어 규칙
-==================================================
+핵심 판단 규칙:
 
-goal은 한국어로 작성합니다.
-task는 한국어로 작성합니다.
-blocker는 한국어로 작성합니다.
+1. current_search를 가장 중요하게 봅니다.
 
-기술 용어는 영어 그대로 사용할 수 있습니다.
+2. recent_searches와 search_related_titles가
+current_search와 같은 주제를 반복해서 가리키면
+그 공통 주제로 goal과 task를 추론합니다.
 
-예:
+3. blocker가 없어도 goal과 task는 추론할 수 있습니다.
 
-PostgreSQL
-SQLAlchemy
-FastAPI
-connection refused
+4. 오류 해결 활동이 명확하면 debugging,
+정보나 설정 방법을 찾는 활동이면 researching으로 판단합니다.
 
-state만 영어 enum을 사용합니다.
+5. unknown은 evidence가 부족하거나
+서로 관련 없는 여러 주제가 섞여 현재 작업을 판단할 수 없을 때만 사용합니다.
 
+6. 기술 검색어로부터 직접 알 수 있는 범위의 추론은 허용합니다.
+evidence에 없는 구체적인 원인만 만들어내지 마세요.
 
-==================================================
-중요 규칙
-==================================================
-
-입력 데이터를 분석하는 당신 자신의 임무를
-사용자의 goal이나 task로 작성하지 마세요.
-
-잘못된 예:
-
-"입력 데이터를 분석하여 원인을 찾기"
-
-"Analyze the provided data"
-
-"Identify the root cause"
-
-"사용자의 상태를 분석하기"
+7. goal과 task는 가능한 경우 한국어로 작성합니다.
+기술 용어와 실제 오류 메시지는 영어 그대로 사용할 수 있습니다.
 
 
-사용자가 실제로 하고 있는 일을 작성하세요.
+예시 1
 
-예:
-
-최근 검색어:
-
-postgresql connection refused
-fastapi postgresql connection refused
-sqlalchemy postgresql connection refused
-
-좋은 출력:
-
+EVIDENCE:
 {
-  "goal": "PostgreSQL 연결 오류 해결",
-  "task": "PostgreSQL connection refused 오류를 조사하고 있음",
+  "current_search": "fastapi allow origins localhost react",
+  "recent_searches": [
+    "fastapi cors 설정",
+    "react cors error localhost api",
+    "react fetch blocked by cors fastapi"
+  ],
+  "search_related_titles": [
+    "CORS - FastAPI",
+    "Sending request from React to FastAPI causes origin localhost:5173 has been blocked by CORS policy error"
+  ]
+}
+
+OUTPUT:
+{
+  "goal": "React와 FastAPI 간 CORS 오류 해결",
+  "task": "FastAPI의 CORS 설정 방법을 조사하고 있음",
   "state": "debugging",
-  "blocker": "PostgreSQL connection refused 오류",
+  "blocker": "React 요청이 CORS policy에 의해 차단되는 오류",
   "confidence": 0.95
 }
 
 
-==================================================
-debugging 규칙
-==================================================
+예시 2
 
-최근 검색어에 다음과 같은 명시적 오류가 반복되면
-debugging으로 판단할 수 있습니다.
+EVIDENCE:
+{
+  "current_search": "best python web framework",
+  "recent_searches": [
+    "fastapi vs flask",
+    "django vs fastapi"
+  ],
+  "search_related_titles": [
+    "FastAPI vs Flask",
+    "Django vs FastAPI"
+  ]
+}
 
-error
-exception
-failed
-failure
-connection refused
-not working
-timeout
-cannot connect
-오류
-에러
-실패
+OUTPUT:
+{
+  "goal": "Python 웹 프레임워크 선택",
+  "task": "여러 Python 웹 프레임워크를 비교하고 있음",
+  "state": "comparing",
+  "blocker": null,
+  "confidence": 0.9
+}
 
-
-==================================================
-blocker 규칙
-==================================================
-
-blocker에는 관찰된 문제만 작성하세요.
-
-예:
-
-"PostgreSQL connection refused 오류"
-
-근본 원인은 추측하지 마세요.
-
-다음은 입력에 직접 나타나지 않으면 작성하면 안 됩니다.
-
-"PostgreSQL 서버가 꺼져 있음"
-
-"포트가 잘못됨"
-
-"방화벽 문제"
-
-"네트워크 문제"
-
-
-==================================================
-금지
-==================================================
-
-해결 방법을 제시하지 마세요.
-추천하지 마세요.
-근본 원인을 추측하지 마세요.
-stuck 여부를 판단하지 마세요.
-intervention을 언급하지 마세요.
-
-JSON 객체 하나만 반환하세요.
-Markdown을 출력하지 마세요.
+JSON 이외의 텍스트는 출력하지 마세요.
 """.strip()
 
 
@@ -954,15 +911,24 @@ def compress_context_evidence(
 def extract_json_object(
     text: str,
 ) -> dict[str, Any]:
+    """
+    Qwen 응답에서 최종 JSON 객체를 안전하게 추출한다.
+
+    no-format generation에서는 reasoning text나
+    <think>...</think>가 content에 포함될 수 있으므로
+    마지막의 유효한 JSON 객체를 우선 사용한다.
+    """
+
     text = text.strip()
+
+    # -----------------------------------------------------
+    # 1. 응답 전체가 JSON인 경우
+    # -----------------------------------------------------
 
     try:
         result = json.loads(text)
 
-        if not isinstance(
-            result,
-            dict,
-        ):
+        if not isinstance(result, dict):
             raise ValueError(
                 "Qwen 응답 JSON이 객체가 아닙니다."
             )
@@ -972,36 +938,59 @@ def extract_json_object(
     except json.JSONDecodeError:
         pass
 
-    match = re.search(
-        r"\{.*\}",
-        text,
-        re.DOTALL,
-    )
+    # -----------------------------------------------------
+    # 2. think block 제거
+    # -----------------------------------------------------
 
-    if not match:
-        raise ValueError(
-            "Qwen 응답에서 JSON 객체를 찾을 수 없습니다."
-        )
+    cleaned = re.sub(
+        r"<think>.*?</think>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
 
     try:
-        result = json.loads(
-            match.group(0)
+        result = json.loads(cleaned)
+
+        if not isinstance(result, dict):
+            raise ValueError(
+                "Qwen 응답 JSON이 객체가 아닙니다."
+            )
+
+        return result
+
+    except json.JSONDecodeError:
+        pass
+
+    # -----------------------------------------------------
+    # 3. JSONDecoder로 모든 객체 후보 탐색
+    # -----------------------------------------------------
+
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+
+    for index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+
+        try:
+            candidate, _ = decoder.raw_decode(
+                cleaned[index:]
+            )
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+
+    if not candidates:
+        raise ValueError(
+            "Qwen 응답에서 유효한 JSON 객체를 찾을 수 없습니다."
         )
 
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Qwen 응답 JSON 파싱 실패: {exc}"
-        ) from exc
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-        raise ValueError(
-            "Qwen 응답 JSON이 객체가 아닙니다."
-        )
-
-    return result
+    # 모델이 설명 뒤 마지막에 최종 답을 쓰는 패턴이므로
+    # 마지막 유효 JSON 객체를 사용한다.
+    return candidates[-1]
 
 
 # =========================================================
@@ -1098,30 +1087,43 @@ def validate_context_result(
         blocker = None
 
     # -----------------------------------------------------
-    # 한국어 descriptive output 검증
+    # Descriptive output language guard
+    # -----------------------------------------------------
+    #
+    # goal/task는 사용자에게 보여주는 설명이므로
+    # 한국어 출력을 기대한다.
+    #
+    # blocker는 실제 오류 메시지나 기술 문구일 수 있으므로
+    # 영어-only 문자열도 정상 evidence로 허용한다.
+    #
+    # 한 필드의 언어 문제 때문에 전체 context를
+    # 폐기하지 않는다.
     # -----------------------------------------------------
 
-    language_invalid = False
-
-    for value in (
-        goal,
-        task,
-        blocker,
+    if (
+        goal
+        and not _contains_korean(
+            goal
+        )
     ):
-        if (
-            value
-            and not _contains_korean(
-                value
-            )
-        ):
-            language_invalid = True
-
-    if language_invalid:
         goal = None
+
+    if (
+        task
+        and not _contains_korean(
+            task
+        )
+    ):
         task = None
-        blocker = None
-        state = "unknown"
-        confidence = 0.0
+
+    # blocker는 다음과 같은 실제 기술 오류를
+    # 그대로 보존할 수 있다.
+    #
+    # "origin http://localhost:5173 has been blocked by CORS policy"
+    # "ECONNREFUSED"
+    # "ModuleNotFoundError"
+    #
+    # 따라서 한국어 포함 여부를 검증하지 않는다.
 
     # -----------------------------------------------------
     # Goal/task 둘 다 없으면 fail closed
@@ -1243,7 +1245,6 @@ def _call_qwen(
         "model": OLLAMA_MODEL,
         "stream": False,
         "think": False,
-        "format": CONTEXT_JSON_SCHEMA,
 
         "messages": [
             {

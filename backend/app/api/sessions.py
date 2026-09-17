@@ -16,6 +16,8 @@ from app.db.database import (
     SessionLocal,
 )
 
+from app.models.feedback import Feedback
+
 from app.schemas.feedback import (
     FeedbackCreate,
 )
@@ -466,6 +468,81 @@ def create_current_feedback(
             ),
         )
 
+
+
+# =========================================================
+# Current Session Feedback History
+# =========================================================
+
+@router.get(
+    "/sessions/current/feedback-history",
+)
+def get_current_feedback_history(
+    limit: int = 20,
+    db: DBSession = Depends(
+        get_db
+    ),
+):
+    try:
+        session_id = (
+            get_current_session_id(
+                db
+            )
+        )
+
+        safe_limit = max(
+            1,
+            min(
+                limit,
+                100,
+            ),
+        )
+
+        feedback_rows = (
+            db.query(Feedback)
+            .filter(
+                Feedback.session_id
+                == session_id
+            )
+            .order_by(
+                Feedback.created_at.desc(),
+                Feedback.id.desc(),
+            )
+            .limit(
+                safe_limit
+            )
+            .all()
+        )
+
+        return {
+            "session_id": session_id,
+            "count": len(
+                feedback_rows
+            ),
+            "items": [
+                serialize_feedback(
+                    feedback
+                )
+                for feedback
+                in feedback_rows
+            ],
+        }
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(
+                exc
+            ),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
 
 
 # =========================================================

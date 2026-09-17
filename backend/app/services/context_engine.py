@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -52,25 +53,46 @@ NULL_LIKE_VALUES = {
 # =========================================================
 
 _CONTEXT_CACHE: dict[
-    tuple[int, str | None],
+    tuple[int, str],
     dict[str, Any],
 ] = {}
 
 _CONTEXT_CACHE_LOCK = threading.Lock()
 
+# Qwen inference single-flight.
+# 여러 API 요청이 동시에 같은 snapshot을 요구해도
+# 실제 Qwen 추론은 한 번에 하나만 수행한다.
+_CONTEXT_INFERENCE_LOCK = threading.Lock()
+
 
 def _make_cache_key(
     session_id: int,
-    temporal_context: dict[str, Any],
-) -> tuple[int, str | None]:
+    compressed_evidence: dict[str, Any],
+) -> tuple[int, str]:
+    """
+    Raw event timestamp가 아니라 실제 Qwen 입력 evidence를
+    fingerprint하여 semantic context cache key로 사용한다.
+    """
+
+    canonical_evidence = json.dumps(
+        compressed_evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    evidence_fingerprint = hashlib.sha256(
+        canonical_evidence.encode("utf-8")
+    ).hexdigest()
+
     return (
         session_id,
-        temporal_context.get("last_activity_timestamp"),
+        evidence_fingerprint,
     )
 
 
 def _get_cached_context(
-    cache_key: tuple[int, str | None],
+    cache_key: tuple[int, str],
 ) -> dict[str, Any] | None:
     with _CONTEXT_CACHE_LOCK:
         cached = _CONTEXT_CACHE.get(cache_key)
@@ -82,7 +104,7 @@ def _get_cached_context(
 
 
 def _set_cached_context(
-    cache_key: tuple[int, str | None],
+    cache_key: tuple[int, str],
     context: dict[str, Any],
 ) -> None:
     with _CONTEXT_CACHE_LOCK:
@@ -1259,6 +1281,7 @@ def _call_qwen(
 
         "options": {
             "temperature": 0.0,
+            "num_predict": 2048,
         },
     }
 
@@ -1385,12 +1408,22 @@ def infer_session_context(
         return _build_idle_context()
 
     # -----------------------------------------------------
-    # 2. Snapshot cache
+    # 2. Evidence compression
+    # -----------------------------------------------------
+
+    compressed_evidence = (
+        compress_context_evidence(
+            temporal_context
+        )
+    )
+
+    # -----------------------------------------------------
+    # 3. Semantic evidence cache
     # -----------------------------------------------------
 
     cache_key = _make_cache_key(
         session_id,
-        temporal_context,
+        compressed_evidence,
     )
 
     cached = _get_cached_context(
@@ -1399,22 +1432,12 @@ def infer_session_context(
 
     if cached is not None:
         print(
-            "[CONTEXT CACHE HIT] "
+            "[CONTEXT EVIDENCE CACHE HIT] "
             f"session={session_id} "
-            f"snapshot={cache_key[1]}"
+            f"fingerprint={cache_key[1][:12]}"
         )
 
         return cached
-
-    # -----------------------------------------------------
-    # 3. Evidence compression
-    # -----------------------------------------------------
-
-    compressed_evidence = (
-        compress_context_evidence(
-            temporal_context
-        )
-    )
 
     # 검색 증거조차 없다면 Qwen 호출 불필요
     has_semantic_evidence = any(
@@ -1452,38 +1475,66 @@ def infer_session_context(
         return final_context
 
     # -----------------------------------------------------
-    # 4. Qwen
+    # 4. Qwen single-flight inference
     # -----------------------------------------------------
 
-    raw_result = _call_qwen(
-        compressed_evidence
-    )
+    with _CONTEXT_INFERENCE_LOCK:
 
-    validated = (
-        validate_context_result(
-            raw_result
+        # lock을 기다리는 동안 다른 요청이 동일 snapshot의
+        # 추론을 완료했을 수 있으므로 cache를 다시 확인한다.
+        cached = _get_cached_context(
+            cache_key
         )
-    )
 
-    # -----------------------------------------------------
-    # 5. Deterministic summary
-    # -----------------------------------------------------
+        if cached is not None:
+            print(
+                "[CONTEXT CACHE HIT AFTER WAIT] "
+                f"session={session_id} "
+                f"fingerprint={cache_key[1][:12]}"
+            )
 
-    final_context = {
-        **validated,
+            return cached
 
-        "summary": build_summary(
-            validated
-        ),
-    }
+        print(
+            "[CONTEXT QWEN START] "
+            f"session={session_id} "
+            f"fingerprint={cache_key[1][:12]}"
+        )
 
-    # -----------------------------------------------------
-    # 6. Cache
-    # -----------------------------------------------------
+        raw_result = _call_qwen(
+            compressed_evidence
+        )
 
-    _set_cached_context(
-        cache_key,
-        final_context,
-    )
+        validated = (
+            validate_context_result(
+                raw_result
+            )
+        )
 
-    return final_context
+        # -------------------------------------------------
+        # 5. Deterministic summary
+        # -------------------------------------------------
+
+        final_context = {
+            **validated,
+            "summary": build_summary(
+                validated
+            ),
+        }
+
+        # -------------------------------------------------
+        # 6. Cache
+        # -------------------------------------------------
+
+        _set_cached_context(
+            cache_key,
+            final_context,
+        )
+
+        print(
+            "[CONTEXT QWEN COMPLETE] "
+            f"session={session_id} "
+            f"fingerprint={cache_key[1][:12]}"
+        )
+
+        return final_context
